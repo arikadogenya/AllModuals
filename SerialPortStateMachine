@@ -1,0 +1,284 @@
+//UART模块，串口收到数据之后运行一个状态机，状态机
+
+include "UartGyro.h"
+#include "FreeRTOS.h"
+#include "task.h"
+#include "cmsis_os.h"
+#include "usart.h"
+#include "stm32f1xx_hal.h"
+
+extern UART_HandleTypeDef huart1;
+extern UART_HandleTypeDef huart2;
+#define GyroUart huart1
+
+osThreadId UartGyroTaskHandle;
+
+osMailQId  UartGyroMail_q_id;  
+
+osMessageQId Send_q_id; 
+
+osThreadId SendTaskHandle;
+
+uint8_t NMEASent[128];
+
+StrUartGyroMail* UartGyroBuffer;
+uint8_t UartGyroBufferIndex;
+
+
+uint8_t GyroState,GyroStateNext;
+StrMyString Heading;
+
+uint8_t UserConfigureation;
+
+void NMEAHeadingIni()
+{
+	
+}
+
+	
+
+
+/* Private function prototypes -----------------------------------------------*/
+/* USER CODE BEGIN FunctionPrototypes */
+   
+/* USER CODE END FunctionPrototypes */
+
+void StartUartGyroTask(void const * argument);
+void StartSendTask(void const * argument);
+
+void UartGyroIni()
+{
+	UserConfigureation=0;
+	
+	osMailQDef (NMEA_q, 2, StrUartGyroMail);  // Declare mail queue      
+	UartGyroMail_q_id = osMailCreate(osMailQ(NMEA_q), NULL);
+	
+	osMessageQDef(Send_q, 3, uint8_t); // Declare a message queue
+	Send_q_id=osMessageCreate(osMessageQ(Send_q), NULL); 
+	
+	
+	osThreadDef(UartGyroTask, StartUartGyroTask, osPriorityNormal, 0, 128);
+	UartGyroTaskHandle = osThreadCreate(osThread(UartGyroTask), NULL);
+	
+	osThreadDef(SendTask, StartSendTask, osPriorityNormal, 0, 128);
+	SendTaskHandle = osThreadCreate(osThread(SendTask), NULL);
+	
+	
+	GyroState=0;
+	GyroStateNext=0;
+	huart1.Instance->CR1=(huart1.Instance->CR1|UART_RXNEIE)|UART_RXNEIE; //Ê¹ÄÜ½ÓÊÜ
+	
+}
+	
+int8_t MyStrcmp(uint8_t* data1,uint8_t* data2,uint8_t Length)
+{
+	for(uint8_t i=0;i<Length;i++)
+	{
+		if(data1[i]!=data2[i])
+		{
+			return -1;
+			break;
+			
+		}
+	}
+	return 0;
+	
+}
+
+static void UartGyro_StateMachine(uint8_t data)
+{
+	switch(GyroState)
+	{
+		case 0:
+			if(data=='$')
+			{
+				UartGyroBuffer=(StrUartGyroMail* )osMailAlloc(UartGyroMail_q_id, 0);
+				if(UartGyroBuffer!=NULL)
+				{
+					UartGyroBufferIndex=0;
+					UartGyroBuffer->Data[UartGyroBufferIndex]=data;
+					UartGyroBufferIndex++;
+					GyroStateNext=1;
+				}
+				else
+				{
+					GyroStateNext=0;
+				}
+			
+			}
+			break;
+		case 1:
+			if(UartGyroBufferIndex>128)
+			{
+				osMailFree(UartGyroMail_q_id,UartGyroBuffer);
+				GyroStateNext=0;
+			}
+			else if(data!=0x0A)
+			{
+				UartGyroBuffer->Data[UartGyroBufferIndex]=data;
+				UartGyroBufferIndex++;
+			}
+			else if(data==0x0A) //ÕâÊÇ·Ï»°
+			{
+				UartGyroBuffer->Data[UartGyroBufferIndex]=data;
+				UartGyroBufferIndex++;
+				UartGyroBuffer->Length=UartGyroBufferIndex;
+				osMailPut(UartGyroMail_q_id,UartGyroBuffer);
+				GyroStateNext=0;
+			}
+		default :break;
+		
+	}
+	GyroState=GyroStateNext;
+}
+
+
+//´¦ÀíÊý¾Ý
+void InfoProcess(uint8_t UserConfiguration, uint8_t Data)
+{
+	switch(UserConfiguration)
+	{
+		case 0:break;
+		
+		default :break;
+	}
+	
+	
+}
+
+void StartSendTask(void const * argument)
+{
+	uint8_t SendState=0;
+	for(;;)
+	{
+		osEvent evt = osMessageGet(Send_q_id, 5);
+		if(evt.status==osEventMessage)
+		{
+			uint8_t content=(uint8_t)(evt.value.p);
+			if(content==1)
+			{
+				SendState=1;
+			}
+			else if(content==2)
+			{
+				SendState=2;
+			}
+			else if(content==3)
+			{
+				SendState=0;
+			}
+			
+		}
+		if(SendState==1)
+		{
+			HAL_UART_Transmit(&huart2,Heading.Data,Heading.Length,100);
+			HAL_GPIO_TogglePin(GPIOC,GPIO_PIN_13);	
+			SendState=0;
+		}
+		else if(SendState==2)
+		{
+			HAL_UART_Transmit(&huart2,Heading.Data,Heading.Length,100);
+			HAL_GPIO_TogglePin(GPIOC,GPIO_PIN_13);	
+		}
+			
+	}
+	
+}
+
+	
+
+void StartUartGyroTask(void const * argument)
+{
+	StrUartGyroMail* NMEA;
+	osEvent event;
+	uint8_t HeadingID[3]={'H','D','T'};
+  /* USER CODE BEGIN StartDefaultTask */
+  /* Infinite loop */
+  for(;;)
+  {
+		if(HAL_GPIO_ReadPin(GPIOB,GPIO_PIN_7)==GPIO_PIN_SET)
+		{
+			UserConfigureation=0;
+		}
+		else
+			{
+				UserConfigureation=1;
+		}
+		if(UserConfigureation==0)
+		{
+			//Ä¬ÈÏÊÕµ½²Å×ª·¢
+			event = osMailGet(UartGyroMail_q_id, osWaitForever);
+			if(event.status==osEventMail)
+			{
+				NMEA=(StrUartGyroMail*)event.value.p;
+				
+				if(MyStrcmp(&(NMEA->Data[3]),HeadingID,3)==0)
+				{
+					for(uint8_t i=0;i<NMEA->Length;i++)
+					{
+						Heading.Data[i]=NMEA->Data[i];
+					}
+					Heading.Length=NMEA->Length;
+				}
+				osMailFree(UartGyroMail_q_id,NMEA);
+				osMessagePut(Send_q_id, 1, 0);
+				osSignalSet(SendTaskHandle,0x01); //¿ªÒ»´Î·¢ËÍ
+	
+			}
+
+			//Get the content
+			
+		}
+		else if(UserConfigureation==1)
+		{
+			//×ª·¢»º´æµÄ£¬ÓÐ¾Í¸üÐÂ£¬1sÃ»ÊÕµ½¾Í¹Ò
+
+			event = osMailGet(UartGyroMail_q_id, 1000);
+				if(event.status==osEventMail)
+				{
+					NMEA=(StrUartGyroMail*)event.value.p;
+					if(MyStrcmp(&(NMEA->Data[3]),HeadingID,3)==0)
+					{
+						for(uint8_t i=0;i<NMEA->Length;i++)
+						{
+							Heading.Data[i]=NMEA->Data[i];
+						}
+						Heading.Length=NMEA->Length;
+					}
+					osMailFree(UartGyroMail_q_id,NMEA);		
+					osMessagePut(Send_q_id, 2, 0);; //¿ªÒ»Ö±·¢ËÍ
+				}else
+				{
+					osMessagePut(Send_q_id, 3, 0);; //¹Øµô·¢ËÍ
+				}
+
+		}
+		
+		
+		
+		
+		HAL_UART_Transmit(&huart2,Heading.Data,Heading.Length,10);
+  }
+  /* USER CODE END StartDefaultTask */
+}
+
+
+void UartGyro_IRQHandler(){
+	unsigned int CR1Temp,SRTemp;
+	unsigned char DRTemp;
+	SRTemp=huart1.Instance->SR;
+	CR1Temp=huart1.Instance->CR1;
+	/*if(((SRTemp&0x0080)==0x0080)&&((CR1Temp&0x0080)==0x0080))
+	{//Send Interrupt
+	}*/
+	/*
+	if(((SRTemp&0x0010)==0x0010)&&((CR1Temp&0x0010)==0x0010))
+	{//IDLE Interrupt
+	}*/
+
+	if(((SRTemp&0x0020)==0x0020)&&((CR1Temp&0x0020)==0x0020))
+	{//Receive Interrupt
+		UartGyro_StateMachine(huart1.Instance->DR);
+	}
+}
+
